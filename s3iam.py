@@ -27,6 +27,7 @@ import yum
 import yum.config
 import yum.Errors
 import yum.plugins
+import botocore.session
 
 from yum.yumRepo import YumRepository
 
@@ -62,7 +63,7 @@ def config_hook(conduit):
     )
     yum.config.RepoConf.backoff = yum.config.Option()
     yum.config.RepoConf.delay = yum.config.Option()
-
+    yum.config.RepoConf.aws_profile = yum.config.BoolOption(False)
 
 def parse_url(url):
     # http://docs.aws.amazon.com/AmazonS3/latest/dev/UsingBucket.html
@@ -97,7 +98,13 @@ def parse_url(url):
 
 
 def iam_is_accessible(timeout=1):
-    """Test if IAM is accessible"""
+    """Test if IAM is accessible or if explit credentials"""
+
+    if yum.config.RepoConf.aws_profile:
+      return True
+    if "AWS_ACCESS_KEY_ID" in os.environ and "AWS_SECRET_ACCESS_KEY" in os.environ:
+       return True
+
     request = urllib2.Request("http://169.254.169.254/latest/meta-data/iam/security-credentials/")
     try:
         urllib2.urlopen(request, timeout=timeout).close()
@@ -162,6 +169,7 @@ class S3Repository(YumRepository):
         self.retries = repo.retries
         self.backoff = repo.backoff
         self.delay = repo.delay
+        self.aws_profile = repo.aws_profile
 
         for attr in OPTIONAL_ATTRIBUTES:
             if hasattr(repo, attr):
@@ -196,8 +204,18 @@ class S3Repository(YumRepository):
     def grab(self):
         if not self.grabber:
             self.grabber = S3Grabber(self)
-            if self.access_id and self.secret_key:
-                self.grabber.set_credentials(self.access_id, self.secret_key)
+            if self.aws_profile:
+               session =  boto3.Session()
+               credentials = session.get_credentials()
+               self.key_id = credentials.access_key
+               self.secret_key = credentials.secret_key
+               if( not self.secret_key ): 
+                  msg = "%s: repository '%s' must" % (__file__, repo.id)
+                  msg += 'have credententials'
+                  raise yum.plugins.PluginYumExit(msg)
+               """ self.region = session.region_name if not self.region and session.region_name  """
+            if self.key_id and self.secret_key:
+                self.grabber.set_credentials(self.key_id, self.secret_key)
             elif self.delegated_role:
                 self.grabber.get_delegated_role_credentials(self.delegated_role)
             else:
@@ -296,6 +314,7 @@ class S3Grabber(object):
             raise URLGrabError(7, msg)
 
     def set_credentials(self, access_key, secret_key):
+        print >>sys.stderr, 'credentials' , access_key , secret_key
         self.access_key = access_key
         self.secret_key = secret_key
         self.token = None
